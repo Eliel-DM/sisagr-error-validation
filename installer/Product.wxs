@@ -1,0 +1,91 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Coletor Biometrico - pacote de instalacao.
+
+  Payload: apenas os scripts .ps1. Nenhum binario compilado e distribuido,
+  o que mantem o instalador fora das heuristicas de deteccao de antivirus
+  que barram executaveis auto-extraidos (ps2exe e similares).
+
+  O upgrade e feito por MajorUpgrade: o UpgradeCode abaixo e fixo e amarra
+  todas as versoes. NUNCA deve ser alterado depois de publicado.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Coletor Biometrico"
+           Language="1046"
+           Version="1.0.0"
+           Manufacturer="SISAGR"
+           UpgradeCode="8C4F2E71-3A6D-4B19-9E05-7C2D48B1F3A6">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="Coletor Biometrico" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <MajorUpgrade DowngradeErrorMessage="Uma versao mais nova do Coletor Biometrico ja esta instalada." />
+
+    <Condition Message="Este instalador requer execucao como Administrador.">
+      Privileged OR Installed
+    </Condition>
+
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="ColetorBiometrico">
+          <Directory Id="ScriptsDir" Name="scripts" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ShortcutFolder" Name="Coletor Biometrico" />
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="Coletor Biometrico" Level="1">
+      <ComponentGroupRef Id="ScriptsGroup" />
+      <ComponentGroupRef Id="ShortcutGroup" />
+    </Feature>
+
+    <!--
+      O subdiretorio scripts\ e obrigatorio: main.ps1 resolve os scripts por
+      Join-Path $PSScriptRoot "scripts". Nao achatar os arquivos.
+    -->
+    <ComponentGroup Id="ScriptsGroup">
+      <Component Id="MainScript" Directory="INSTALLFOLDER" Guid="*">
+        <File Id="main_ps1" Source="..\src\main.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="DriverScript" Directory="ScriptsDir" Guid="*">
+        <File Id="leitor_ps1" Source="..\src\scripts\leitor-biometrico.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="JavaTempScript" Directory="ScriptsDir" Guid="*">
+        <File Id="limpar_ps1" Source="..\src\scripts\limparTempJava.ps1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ShortcutGroup" Directory="ShortcutFolder">
+      <Component Id="AppShortcut">
+        <Shortcut Id="AppLnk"
+                  Name="Coletor Biometrico"
+                  Description="Instalacao de drivers e limpeza de cache Java"
+                  Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
+                  Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]main.ps1&quot;"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKLM"
+                       Key="Software\SISAGR\ColetorBiometrico"
+                       Name="InstallFolder"
+                       Type="string"
+                       Value="[INSTALLFOLDER]"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+    </UI>
+  </Product>
+</Wix>

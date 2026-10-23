@@ -1,225 +1,136 @@
 <#
 .SYNOPSIS
-    Combina os scripts do projeto em um único .ps1 e opcionalmente compila para .exe.
-.DESCRIPTION
-    Lê os scripts auxiliares, embrulha cada um em uma função, e gera um
-    combined.ps1 com o menu principal adaptado.
+    Gera o ColetorBiometrico.msi a partir dos scripts em src\.
 
-    Uso:
-        .\build.ps1                   # só gera o combined.ps1
-        .\build.ps1 -Compile          # gera + compila com console
-        .\build.ps1 -Compile -NoConsole  # gera + compila sem console
-.PARAMETER Compile
-    Compila o combined.ps1 em ColetorBiometrico.exe via PS2EXE.
-.PARAMETER NoConsole
-    Gera EXE sem janela de console (modo GUI).
+.DESCRIPTION
+    Usa o WiX Toolset v3 (candle.exe + light.exe) para empacotar os scripts
+    .ps1 em um instalador MSI per-machine. O payload nao contem nenhum binario
+    compilado, apenas os scripts e um atalho que invoca powershell.exe.
+
+.PARAMETER Version
+    Versao do produto. Padrao: 1.0.0
+
+.PARAMETER WixBin
+    Caminho da pasta bin do WiX Toolset v3. Se omitido, procura em
+    <repo>\tools\wix e depois em C:\Program Files (x86)\WiX Toolset v3*.
+
+.EXAMPLE
+    .\build.ps1
+    .\build.ps1 -Version 1.1.0
+    .\build.ps1 -WixBin "$env:LOCALAPPDATA\wix\extracted"
+
+.NOTES
+    Pre-requisito: choco install wixtoolset -y
 #>
 
+[CmdletBinding()]
 param(
-    [switch]$Compile,
-    [switch]$NoConsole
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$Version = "1.0.0",
+
+    [string]$WixBin
 )
 
 $ErrorActionPreference = "Stop"
 
-# ── Caminhos ──────────────────────────────────────────────────────────────
-$projectRoot  = $PSScriptRoot
-$srcDir       = Join-Path $projectRoot "src"
-$scriptsDir   = Join-Path $srcDir "scripts"
-$outputFile   = Join-Path $srcDir "combined.ps1"
-$exeOutput    = Join-Path $projectRoot "ColetorBiometrico.exe"
-$iconFile     = Join-Path $projectRoot "icone.ico"
+$projectRoot   = $PSScriptRoot
+$installerDir = Join-Path $projectRoot "installer"
+$wxs          = Join-Path $installerDir "Product.wxs"
+$objDir       = Join-Path $projectRoot "build\obj"
+$msiOutput    = Join-Path $projectRoot "ColetorBiometrico.msi"
 
-# ── Arquivos de entrada ──────────────────────────────────────────────────
-$leitorScript = Join-Path $scriptsDir "leitor-biometrico.ps1"
-$limparScript = Join-Path $scriptsDir "limparTempJava.ps1"
-$mainScript   = Join-Path $srcDir "main.ps1"
+# ── Valida entradas ───────────────────────────────────────────────────────
+$inputs = @(
+    (Join-Path $projectRoot "src\main.ps1")
+    (Join-Path $projectRoot "src\scripts\leitor-biometrico.ps1")
+    (Join-Path $projectRoot "src\scripts\limparTempJava.ps1")
+)
 
-# ── Validação dos arquivos de entrada ────────────────────────────────────
-foreach ($path in @($leitorScript, $limparScript, $mainScript)) {
-    if (-not (Test-Path $path)) {
-        Write-Host "ERRO: Arquivo nao encontrado: $path" -ForegroundColor Red
+foreach ($file in @($wxs) + $inputs) {
+    if (-not (Test-Path $file)) {
+        Write-Host "ERRO: arquivo nao encontrado: $file" -ForegroundColor Red
         exit 1
     }
 }
 
-Write-Host "Lendo scripts..." -ForegroundColor Cyan
+# ── Localiza o WiX ────────────────────────────────────────────────────────
+# Ordem de busca:
+#   1. -WixBin explícito
+#   2. <repo>\tools\wix (portátil, sem necessidade de instalar)
+#   3. instalação em C:\Program Files (x86)\WiX Toolset v3*
+# Ordena por nome decrescente para pegar a maior versao (v3.14 > v3.11).
+$wixCandidates = @(
+    $WixBin
+    (Join-Path $projectRoot "tools\wix")
+    (Get-ChildItem "C:\Program Files (x86)\WiX Toolset v3*" -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName "bin" })
+) | Where-Object { $_ -and (Test-Path (Join-Path $_ "candle.exe")) }
 
-# ── Lê os scripts auxiliares e embrulha em funções ──────────────────────
-$leitorConteudo = Get-Content -Raw $leitorScript -Encoding UTF8
-$limparConteudo = Get-Content -Raw $limparScript -Encoding UTF8
+$wixBin = $wixCandidates | Select-Object -First 1
 
-$leitorWrapper = @"
-# ============================================================
-# Script embrulhado: leitor-biometrico.ps1
-# ============================================================
-function Invoke-InstalarDrivers {
-$leitorConteudo
-}
-"@
-
-$limparWrapper = @"
-# ============================================================
-# Script embrulhado: limparTempJava.ps1
-# ============================================================
-function Invoke-LimparTempJava {
-$limparConteudo
-}
-"@
-
-# ── Lê e adapta o main.ps1 ──────────────────────────────────────────────
-$linhas = Get-Content $mainScript -Encoding UTF8
-$novasLinhas = @()
-$dentroExecutarScript = 0
-$dentroSwitchCase1 = $false
-$dentroSwitchCase2 = $false
-
-# Função Executar-Script modificada (aceita scriptblock)
-$novoExecutarScript = @"
-function Executar-Script {
-    param(
-        [scriptblock]`$Bloco,
-        [string]`$Titulo
-    )
-
-    Clear-Host
-    Write-Host "=== `$Titulo ===" -ForegroundColor Yellow
-    Write-Host ""
-
-    if (`$null -ne `$Bloco) {
-        & `$Bloco
-    } else {
-        Write-Host "Erro: Bloco de script nulo." -ForegroundColor Red
-    }
-
-    Write-Host ""
-    Read-Host "Pressione Enter para voltar ao menu..." | Out-Null
-}
-"@
-
-foreach ($linha in $linhas) {
-    # Pula a definição antiga da função Executar-Script (usando brace depth)
-    if ($linha -match '^function Executar-Script\b') {
-        $dentroExecutarScript = 1  # já conta a { da linha de definição
-        continue
-    }
-    if ($dentroExecutarScript -gt 0) {
-        # Conta { e } para saber quando a função realmente termina
-        foreach ($c in $linha.ToCharArray()) {
-            if ($c -eq '{') { $dentroExecutarScript++ }
-            if ($c -eq '}') { $dentroExecutarScript-- }
-        }
-        if ($dentroExecutarScript -eq 0) {
-            $novasLinhas += $novoExecutarScript
-        }
-        continue
-    }
-
-    # Detecta início dos cases '1' e '2' no switch
-    if ($linha -match "'1'\s*\{") {
-        $novasLinhas += $linha
-        $dentroSwitchCase1 = $true
-        continue
-    }
-    if ($linha -match "'2'\s*\{") {
-        $novasLinhas += $linha
-        $dentroSwitchCase2 = $true
-        continue
-    }
-
-    # Substitui linha do Executar-Script dentro do case '1' /
-    if ($dentroSwitchCase1 -and $linha -match 'Executar-Script') {
-        $novasLinhas += "                Executar-Script -Bloco `${function:Invoke-InstalarDrivers} -Titulo `"Instalação/Atualização de Drivers`""
-        continue
-    }
-    # Substitui linha do Executar-Script dentro do case '2'
-    if ($dentroSwitchCase2 -and $linha -match 'Executar-Script') {
-        $novasLinhas += "                Executar-Script -Bloco `${function:Invoke-LimparTempJava} -Titulo `"Limpeza de Temp e Cache Java`""
-        continue
-    }
-
-    # Fim dos cases: linha com '}'
-    if ($dentroSwitchCase1 -and $linha.Trim() -eq '}') {
-        $novasLinhas += $linha
-        $dentroSwitchCase1 = $false
-        continue
-    }
-    if ($dentroSwitchCase2 -and $linha.Trim() -eq '}') {
-        $novasLinhas += $linha
-        $dentroSwitchCase2 = $false
-        continue
-    }
-
-    # Pula linha -Titulo dentro dos cases
-    if ($dentroSwitchCase1 -or $dentroSwitchCase2) {
-        continue
-    }
-
-    $novasLinhas += $linha
+if (-not $wixBin) {
+    Write-Host "ERRO: WiX Toolset v3 nao encontrado." -ForegroundColor Red
+    Write-Host "  Instale com:  choco install wixtoolset -y" -ForegroundColor Yellow
+    Write-Host "  Ou extraia o portatil em: $projectRoot\tools\wix" -ForegroundColor Yellow
+    exit 1
 }
 
-$mainModificado = $novasLinhas -join "`r`n"
+$candle = Join-Path $wixBin "candle.exe"
+$light  = Join-Path $wixBin "light.exe"
 
-# ── Monta o combined.ps1 ──────────────────────────────────────────────────
-$cabecalho = @"
-<#
-.SYNOPSIS
-    Script combinado - Coletor Biometrico + Limpeza Java.
-.DESCRIPTION
-    Gerado automaticamente pelo build.ps1 em $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss').
-    Compila todos os modulos em um unico arquivo para distribuicao via PS2EXE.
-.NOTES
-    Nao edite este arquivo manualmente - ele e gerado pelo build.ps1.
-#>
+Write-Host "WiX: $wixBin" -ForegroundColor DarkGray
 
-#Requires -RunAsAdministrator
+# ── Aplica a versao no .wxs ───────────────────────────────────────────────
+# Substitui apenas o atributo Version do elemento Product, sem tocar no
+# ProductVersion do schema nem em outros atributos.
+$wxsContent = Get-Content $wxs -Raw -Encoding UTF8
+$wxsContent = $wxsContent -replace '(?s)(<Product\b.*?Version=")[^"]*(")', "`${1}$Version`${2}"
+Set-Content -Path $wxs -Value $wxsContent -Encoding UTF8 -NoNewline
 
-"@
+# ── Build ─────────────────────────────────────────────────────────────────
+if (Test-Path $objDir) {
+    Remove-Item $objDir -Recurse -Force
+}
+New-Item -Path $objDir -ItemType Directory -Force | Out-Null
 
-$combined = $cabecalho + "`r`n" + $leitorWrapper + "`r`n`r`n" + $limparWrapper + "`r`n`r`n" + $mainModificado
+$wixobj = Join-Path $objDir "Product.wixobj"
 
-# ── Salva ──────────────────────────────────────────────────────────────────
-$combined | Out-File -FilePath $outputFile -Encoding UTF8 -Force
-Write-Host "combined.ps1 gerado em: $outputFile" -ForegroundColor Green
-
-# ── Compilação opcional ────────────────────────────────────────────────────
-if ($Compile) {
-    if (-not (Get-Module -ListAvailable -Name ps2exe)) {
-        Write-Host "ERRO: Modulo ps2exe nao encontrado. Instale com:" -ForegroundColor Red
-        Write-Host "  Install-Module -Name ps2exe -Scope CurrentUser -Force" -ForegroundColor Yellow
-        exit 1
+Push-Location $installerDir
+try {
+    Write-Host "[1/2] candle.exe - compilando o .wxs..." -ForegroundColor Cyan
+    # -fips e exigido em maquinas com FIPS habilitado (padrao em ambiente
+    # corporativo); sem ele o candle aborta com CNDL0308.
+    # Os GUIDs estaveis vem de Guid="*" nos <Component> do .wxs.
+    & $candle -nologo -arch x64 -ext WixUIExtension -fips -out $wixobj $wxs
+    if ($LASTEXITCODE -ne 0) {
+        throw "candle.exe falhou com codigo $LASTEXITCODE"
     }
 
-    Import-Module ps2exe -Force -ErrorAction Stop
-
-    $parametros = @{
-        InputFile    = $outputFile
-        OutputFile   = $exeOutput
-        Title        = "Coletor Biometrico"
-        Description  = "Instalador de drivers e limpeza de cache Java"
-        Company      = "SISAGR"
-        Product      = "Coletor Biometrico"
-        Version      = "1.0.0"
-        RequireAdmin = $true
+    Write-Host "[2/2] light.exe - linkando o MSI (validacao ICE)..." -ForegroundColor Cyan
+    # -sice: o atalho vive em ProgramMenuFolder (per-user por natureza) mas o
+    # pacote e per-machine com keypath em HKLM. E o padrao recomendado pela
+    # Microsoft para Start Menu shortcuts em pacotes admin, e dispara ICE38 /
+    # ICE43 / ICE57 por analise estatica de diretorio. Ver comentario no .wxs.
+    & $light -nologo -ext WixUIExtension -cultures:pt-BR `
+        -sice:ICE38 -sice:ICE43 -sice:ICE57 `
+        -out $msiOutput $wixobj
+    if ($LASTEXITCODE -ne 0) {
+        throw "light.exe falhou com codigo $LASTEXITCODE"
     }
-
-    if ($NoConsole) {
-        $parametros.NoConsole = $true
-    }
-
-    if (Test-Path $iconFile) {
-        $parametros.IconFile = $iconFile
-    }
-
-    Write-Host "Compilando EXE..." -ForegroundColor Cyan
-    Invoke-PS2EXE @parametros
-
-    if (Test-Path $exeOutput) {
-        Write-Host "OK EXE gerado em: $exeOutput" -ForegroundColor Green
-    } else {
-        Write-Host "ERRO: Falha ao gerar o EXE." -ForegroundColor Red
-        exit 1
-    }
+} finally {
+    Pop-Location
 }
 
-Write-Host "Concluido." -ForegroundColor Green
+if (-not (Test-Path $msiOutput)) {
+    Write-Host "ERRO: o MSI nao foi gerado." -ForegroundColor Red
+    exit 1
+}
+
+$kb = [math]::Round((Get-Item $msiOutput).Length / 1KB, 1)
+
+Write-Host ""
+Write-Host "SUCESSO: $msiOutput ($kb KB) - versao $Version" -ForegroundColor Green
+Write-Host ""
+Write-Host "Instalar:     msiexec /i `"$msiOutput`"" -ForegroundColor Gray
+Write-Host "Desinstalar:  msiexec /x `"$msiOutput`"" -ForegroundColor Gray

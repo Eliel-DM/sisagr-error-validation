@@ -1,0 +1,8 @@
+# Artefatos de build do MSI
+ColetorBiometrico.msi
+ColetorBiometrico.wixpdb
+build/
+*.log
+
+# Payloads antigos do ps2exe (nao usados desde a migracao para MSI)
+*.exe
